@@ -36,11 +36,12 @@ class wallet:
         self.key_inizialization(exchanges,apis)
         self.wallet=self.wallet_inizialitazion()
         #if str(datetime.date.today()) not in np.unique(self.wallet["date"].to_list()):
-        if True:
+        if False:
             if "binance" in exchanges:
                 self.add_today_binance()
             if "nexo" in exchanges:
                 self.add_today_nexo()
+        print(self.wallet)
         #self.check_missing_days("binance")
         self.wallet.to_csv(os.path.join(self.path,"wallet.csv"))
 
@@ -66,13 +67,13 @@ class wallet:
         if not os.path.exists(self.path):
             os.makedirs(self.path)
         try:
-            wallet=pd.read_csv(os.path.join(self.path,"wallet.csv"),index_col=[0,2])
+            wallet=pd.read_csv(os.path.join(self.path,"wallet.csv"),index_col=[0,1,2])
         except:
             wallet=self.wallet_creation()
             wallet.to_csv(os.path.join(self.path,"wallet.csv"))
         return wallet
       
-    def binance_data(self):#add locking stacking, maybe with external function
+    def binance_data(self):
         """
         Get data from binance api
 
@@ -99,10 +100,9 @@ class wallet:
             else:
                 v2=0
             result.loc[(i,str(datetime.date.today()),"binance"),"ammount"]=v1+v2#performance error here
-        result.sort_index()
         return result
 
-    def add_today_binance(self):
+    def add_today_binance(self):#add locking stacking, maybe with external function
         """
         add the daily income to your dataframe.
         This action can change the dataframe only once per day.
@@ -111,35 +111,24 @@ class wallet:
         date=datetime.date.today()
         today_df=self.binance_data()
         temp_df=pd.DataFrame(columns=self.wallet.columns,index=today_df.index)
-        temp_df.sort_index()
         prices=[]
         for asset in today_df.index:
             response=cmc.cryptocurrency_quotes_latest(symbol=asset[0],convert="EUR").__str__().replace("\'", "\"").replace('None','"None"').split("OK: ")[1]
             prices+=[json.loads(response)[asset[0]]["quote"]["EUR"]["price"]]
-        today_df["value"]=np.array(today_df["ammount"].to_list())*np.array(prices)
-        print(self.wallet.index.to_list())
-        if str(date) not in np.unique(self.wallet.index.to_list()):
+        today_df["value"]=np.array(today_df["ammount"].to_list()).astype(float)*np.array(prices).astype(float)
+        if str(date) not in self.wallet.index.get_level_values("date").to_list():
             self.wallet=self.wallet.append(today_df)
         return temp_df
 
-    def check_missing_days(self,exchange):
-        wallet=self.wallet[self.wallet["location"]==exchange]
-        for asset in np.unique(wallet.index.to_list()):
-            if len(wallet.loc[asset,:]["date"])>=2 and not isinstance(wallet.loc[asset,:]["date"],str):
-                d0=wallet.loc[asset,:]["date"].to_list()[-2].split("-")
-                d0=[int(i) for i in d0]
-                d0=datetime.date(d0[0],d0[1],d0[2])
-                d1=wallet.loc[asset,:]["date"][-1].split("-")
-                d1=[int(i) for i in d1]
-                d1=datetime.date(d1[0],d1[1],d1[2])
-                interval=d1-d0
-                interval=interval.days
-                if interval>=2:
-                    for i in range(interval-1):
-                        date=d0+datetime.timedelta(days=i)
+    def add_today_nexo(self):
+        if "nexo" in self.wallet.index.get_level_values("location").to_list():
+            nexo_wallet=self.nexo_data()
 
+    def nexo_data(self):
+        yesterday=str(datetime.date.today-datetime.timedelta(days=1))
+        wallet=self.wallet.xs("nexo",level="location")
 
-    def add_paid_asset(self,asset,quantity,price,date=datetime.date.today(),location="binance"):###old savings
+    def add_paid_asset(self,asset,quantity,price,location="binance"):###old savings
         """
         change the self.wallet saved file following user given instruction.
 
@@ -152,23 +141,57 @@ class wallet:
             price:
         float, price of the bought asset
         """
-        wallet=self.to_multindex(self.wallet)
-        date=str(date)
         today=str(datetime.date.today())
-        if date==today:
-            wallet.loc[(asset,date),"paid"]=wallet.loc[(asset,date),"paid"]+quantity
-            wallet.loc[(asset,date),"cost"]=price
-            wallet.loc[(asset,date),"value"]=wallet.loc[(asset,date),"value"]+price
+        exist_today=(asset,today,location) in self.wallet.index.to_list()
+        if not exist_today:
+            cmc=coinmarketcapapi.CoinMarketCapAPI(self.cmc_key)
+            response=cmc.cryptocurrency_quotes_latest(symbol=asset,convert="EUR").__str__().replace("\'", "\"").replace('None','"None"').split("OK: ")[1]
+            price=json.loads(response)[asset]["quote"]["EUR"]["price"]
+            wallet=pd.DataFrame([[asset,today,location,quantity,quantity*price]],columns=["asset","date","location","ammount","value"])
+            wallet=wallet.set_index(["asset","date","location"])
+            self.wallet=self.wallet.append(wallet)
         else:
-            raise ValueError ("To be implemented")
-        wallet=wallet.reset_index(level="date")
-        self.wallet=wallet
-        return wallet
+            cmc=coinmarketcapapi.CoinMarketCapAPI(self.cmc_key)
+            response=cmc.cryptocurrency_quotes_latest(symbol=asset,convert="EUR").__str__().replace("\'", "\"").replace('None','"None"').split("OK: ")[1]
+            price=json.loads(response)[asset]["quote"]["EUR"]["price"]
+            self.wallet.loc[(asset,today,location),:]+=[quantity,quantity*price]
+        return self.wallet
+
+        
+
+    def check_missing_days(self,exchange):
+        if False:
+            wallet=self.wallet[self.wallet["location"]==exchange]
+            for asset in np.unique(wallet.index.to_list()):
+                if len(wallet.loc[asset,:]["date"])>=2 and not isinstance(wallet.loc[asset,:]["date"],str):
+                    d0=wallet.loc[asset,:]["date"].to_list()[-2].split("-")
+                    d0=[int(i) for i in d0]
+                    d0=datetime.date(d0[0],d0[1],d0[2])
+                    d1=wallet.loc[asset,:]["date"][-1].split("-")
+                    d1=[int(i) for i in d1]
+                    d1=datetime.date(d1[0],d1[1],d1[2])
+                    interval=d1-d0
+                    interval=interval.days
+                    if interval>=2:
+                        for i in range(interval-1):
+                            date=d0+datetime.timedelta(days=i)
+        else:
+            pass
 
     def add_today_nexo(self,interest="nexo"):
         pass
 
+def read_secrets():
+    paths=[f for f in os.listdir("./secrets") if f[-4:]==".txt"]
+    api=[]
+    for f in paths:
+        with open(os.path.join("./secrets/",f), "r") as text_file:
+            api.append(text_file.read())
+    return dict(zip([f[:-4] for f in paths],api))
 
 if __name__=="__main__":
-    my_wallet=wallet()
+    my_wallet=wallet(["binance","nexo"],read_secrets())
+    my_wallet.add_paid_asset(asset="BTC",quantity=0.2,price=1000,location="nexo")
+    #my_wallet.add_paid_asset(asset="ADA",quantity=0.2,price=1000,location="binance")
+    print(my_wallet.wallet)
     #print(my_wallet.add_paid_asset(asset="BETH",quantity=0.3,price=200))
