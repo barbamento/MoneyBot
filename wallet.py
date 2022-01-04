@@ -34,9 +34,14 @@ class wallet:
         self.path=path
         self.key_inizialization(exchanges,apis)
         self.wallet=self.wallet_inizialitazion()
-        if str(datetime.date.today()) not in np.unique(self.wallet["date"].to_list()): 
-            self.add_today_binance()
-            self.add_today_nexo()
+        print(self.wallet)
+        #if str(datetime.date.today()) not in np.unique(self.wallet["date"].to_list()):
+        if True:
+            if "binance" in exchanges:
+                self.add_today_binance()
+            if "nexo" in exchanges:
+                self.add_today_nexo()
+        self.check_missing_days("binance")
         self.wallet.to_csv(os.path.join(self.path,"wallet.csv"))
 
     def key_inizialization(self,exchanges,apis):
@@ -49,7 +54,9 @@ class wallet:
         """
         create a new wallet if none are found in the directory
         """
-        wallet=pd.DataFrame(columns=["date","paid","cost","not paid","value","location"])
+        wallet=pd.DataFrame(columns=["paid","cost","not paid","value","location"])
+        index=pd.MultiIndex(names=["asset","date"])
+        wallet.index=index
         return wallet
 
     def wallet_inizialitazion(self):
@@ -85,10 +92,11 @@ class wallet:
         date=datetime.date.today()
         yesterday=date-datetime.timedelta(days=1)
         today_df=self.binance_data()
+        print(today_df)
         if self.wallet.empty:
             wallet=self.wallet
         else:
-            wallet=self.wallet[self.wallet["location"=="binance"]]
+            wallet=self.wallet[self.wallet["location"]=="binance"]
         temp_df=pd.DataFrame(columns=wallet.columns)
         df=today_df.apply(np.sum,axis=1)
         for asset in today_df.index:
@@ -106,7 +114,25 @@ class wallet:
                                                             "binance"]
         if date not in np.unique(self.wallet["date"]):
             self.wallet=self.wallet.append(temp_df.fillna(0))
+            self.check_missing_days("binance")
         return temp_df.fillna(0)
+
+    def check_missing_days(self,exchange):
+        wallet=self.wallet[self.wallet["location"]==exchange]
+        for asset in np.unique(wallet.index.to_list()):
+            if len(wallet.loc[asset,:]["date"])>=2 and not isinstance(wallet.loc[asset,:]["date"],str):
+                d0=wallet.loc[asset,:]["date"].to_list()[-2].split("-")
+                d0=[int(i) for i in d0]
+                d0=datetime.date(d0[0],d0[1],d0[2])
+                d1=wallet.loc[asset,:]["date"][-1].split("-")
+                d1=[int(i) for i in d1]
+                d1=datetime.date(d1[0],d1[1],d1[2])
+                interval=d1-d0
+                interval=interval.days
+                if interval>=2:
+                    for i in range(interval-1):
+                        date=d0+datetime.timedelta(days=i)
+
 
     def add_paid_asset(self,asset,quantity,price,date=datetime.date.today(),location="binance"):###old savings
         """
@@ -121,11 +147,7 @@ class wallet:
             price:
         float, price of the bought asset
         """
-        wallet=self.wallet
-        numerical_wallet=self.wallet.loc[:,["paid","cost","not paid","value"]].to_numpy()
-        index=pd.MultiIndex.from_frame(self.wallet["date"].reset_index())
-        wallet=wallet.drop(["date"],axis=1)
-        wallet.index=index
+        wallet=self.to_multindex(self.wallet)
         date=str(date)
         today=str(datetime.date.today())
         if date==today:
