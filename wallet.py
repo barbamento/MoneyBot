@@ -1,5 +1,8 @@
+from calendar import month
 from gc import freeze
 from inspect import stack
+from lib2to3.pgen2.token import PERCENTEQUAL
+from platform import release
 from tracemalloc import start
 import pandas as pd
 import numpy as np
@@ -10,8 +13,10 @@ from requests.exceptions import ConnectionError, Timeout, TooManyRedirects
 import json
 import datetime
 from binance import Client
+from sklearn.model_selection import LeaveOneGroupOut
 import Mtg
 from requests.models import codes
+from dateutil import relativedelta
 
 #   TO DO LIST
 #       
@@ -161,39 +166,153 @@ class binance:
             wallet=self.stack_creation()
             wallet.to_csv(os.path.join(self.path,"binance_stack.csv"))
         return wallet
-             
+
+class nexo2:
+    def __init__(self,cmc):
+        self.cmc=cmc
+        self.name="nexo"
+        self.path="nexo"
+        self.methon="coin"
+        self.terms=self.load_terms()
+
+    def load_terms(self):
+        try:
+            df=pd.read_csv(os.path.join(self.path,"nexo_terms.csv"),index_col=[0,1,2])
+        except:
+            df=pd.DataFrame(columns=["asset","term","nexo_tokens","percentage"])
+            df=df.set_index(["asset","term","nexo_tokens"])
+        df=df.sort_index(level=0)
+        df.to_csv(os.path.join(self.path,"nexo_terms.csv"))
+        return df
+
+
 class nexo:
     def __init__(self,cmc):
         self.name="nexo"
         self.path="nexo"
         self.cmc=cmc
+        self.method="coin"
         self.stacks=self.load_stacking()
-        self.add_today_wallet()
-
-    def nexo_situation(self):
-        pass
-
-    def add_today_wallet(self):#rimetti a posto perchè domani non worka più
-        '''
-        1.load stacks
-        2.load wallet
-        3.load conditions
-        4.use condition to calculate todays intrest
-        5.return wallet+intrest        
-        '''
         self.wallet=self.wallet_inizialitazion()
-        yesterday_index=[list(i) for i in self.wallet.index.to_list()]
-        for ind in yesterday_index:
-            stacked,free=self.wallet.loc[tuple(ind),["stacked","free"]]
-            response=self.cmc.cryptocurrency_quotes_latest(symbol=ind[0],convert="EUR").__str__().replace("\'", "\"").replace('None','"None"').split("OK: ")[1]
-            price=json.loads(response)[ind[0]]["quote"]["EUR"]["price"]
-            ind[3:6]=[stacked,free,(stacked+free)*price]
-            ind[1]=str(datetime.date.today())
-        today_wallet=pd.DataFrame(yesterday_index,columns=["asset","date","location","stacked","free","value"])
-        today_wallet=today_wallet.set_index(["asset","date","location"]).sort_index(level=0)        
-        self.wallet=pd.concat([self.wallet,today_wallet])
-        self.wallet.to_csv(os.path.join(self.path,"nexo.csv")) 
-        return today_wallet
+        print(self.wallet)
+        if str(datetime.date.today()) not in self.wallet.index.get_level_values("date").to_list():
+            self.add_today_wallet()
+            exit()
+            self.wallet.to_csv(os.path.join(self.path,"nexo.csv"))
+        print(self.wallet)
+        
+    def add_today_wallet(self):
+        today_wallet=pd.DataFrame(columns=["asset","date","location","stacked","free","value"])
+        today_wallet=today_wallet.set_index(["asset","date","location"]).sort_index(level=0)
+        today=str(datetime.date.today())
+        '''
+        add stacks to today_wallet. It adds locked value and indexes
+        '''
+        for asset,location,release_day in self.stacks.index:
+            ammount,interest_type,accrued=self.stacks.loc[(asset,location,release_day),:]
+            if (asset,today,"nexo") in today_wallet.index:
+                stacked,free,value=today_wallet.loc[(asset,today,"nexo"),:]
+                price=value/(stacked+free)
+                stacked+=ammount
+                today_wallet.loc[(asset,today,"nexo"),:]=[stacked,free,(stacked+free)*price]
+            else:
+                response=self.cmc.cryptocurrency_quotes_latest(symbol=asset,convert="EUR").__str__().replace("\'", "\"").replace('None','"None"').split("OK: ")[1]
+                price=json.loads(response)[asset]["quote"]["EUR"]["price"]
+                today_wallet.loc[(asset,today,"nexo"),:]=[ammount,0,price*ammount]
+        """
+        add free coins to today_wallet. It adds free value and indexes
+        """
+        yesterday=str(datetime.date.today()-datetime.timedelta(days=1))
+        for ind in self.wallet.index:
+            ind=list(ind)
+            self.wallet=self.wallet.sort_index(level=0)
+            if ind[1]==yesterday:
+                yesterday_info=self.wallet.loc[tuple(ind),:]
+                asset=ind[0]
+                if (asset,today,"nexo") in today_wallet.index:
+                    stacked,free,value=today_wallet.loc[(asset,today,"nexo"),:]
+                    price=value/(stacked+free)
+                    free+=ammount
+                    free=yesterday_info[1]
+                    today_wallet.loc[(asset,today,"nexo"),:]=[stacked,free,(stacked+free)*price]
+                else:
+                    response=self.cmc.cryptocurrency_quotes_latest(symbol=asset,convert="EUR").__str__().replace("\'", "\"").replace('None','"None"').split("OK: ")[1]
+                    price=json.loads(response)[asset]["quote"]["EUR"]["price"]
+                    today_wallet.loc[(asset,today,"nexo"),:]=[0,yesterday_info[1],yesterday_info[1]*price]
+        print(today_wallet)
+        print(self.wallet)
+        '''
+        add interest to today wallet
+        '''
+        #nexo_type=self.nexo_percentage(today_wallet)
+        nexo_type="GOLD"
+        for ind in today_wallet.index:#it add flex interest
+            print(ind)
+            asset=list(ind)[0]
+            free=today_wallet.loc[ind,"free"] 
+            free+=self.interest(asset,"FLEX",free,nexo_type,method=self.method)
+            today_wallet.loc[ind,"free"]=free
+        for ind in self.stacks.index:#add accrued term interest
+            stack_type=self.stacks.loc[ind,"type"]
+            if stack_type=="LOCK1":
+                days=30
+            elif stack_type=="LOCK3":
+                days=90
+            elif stack_type=="LOCK12":
+                days=365
+            else:
+                raise ValueError ("Problems in nexo_stack.csv.\ncheck {} for {}".format(stack_type,ind))
+            asset=list(ind)[0]
+            accrued=self.stacks.loc[ind,"accrued"]
+            stacked=self.stacks.loc[ind,"stacked"]
+            accrued+=self.interest(asset,stack_type,stacked,nexo_type,method=self.method)*days
+            if list(ind)[2]!=str(datetime.date.today()+relativedelta(months=1)) and stack_type=="LOCK1":
+                pass
+            elif list(ind)[2]!=str(datetime.date.today()+relativedelta(months=3)) and stack_type=="LOCK3":
+                pass
+            elif list(ind)[2]!=str(datetime.date.today()+datetime.timedelta(days=365)) and stack_type=="LOCK12":
+                pass
+            else:
+                self.stacks.loc[ind,"accrued"]=accrued
+            if list(ind)[2]==today:
+                print("The stacking preiod of {} is finished. You earned {} {}".format(asset,accrued,self.method))
+                today_wallet.loc[(asset,today,"nexo"),"stacked"]+=accrued   
+        print(today_wallet)     
+        #self.wallet=pd.concat([self.wallet,today_wallet]).sort_index(level=0)
+
+    def nexo_percentage(self,wallet):
+        today=str(datetime.date.today())
+        total_value=wallet.sort_index(level=0).reset_index(level=["asset","location"]).loc[today,"value"].sum()
+        nexo_value=wallet.loc[("NEXO",today,"nexo"),"value"]
+        print("nexo value : {}\ntotal value : {}".format(nexo_value,total_value))
+        if nexo_value/total_value<0.01:
+            return "BASE"
+        elif nexo_value/total_value<0.05:
+            return "SILVER"
+        elif nexo_value/total_value<0.1:
+            return "GOLD"
+        else:
+            return "PLATINUM"
+
+    def interest(self,asset,term,quantity,nexo_term,method="nexo"):
+        percentage=self.terms().loc[(asset,term,nexo_term),"percentage"]
+        if method=="nexo":
+            interest=quantity*percentage/100
+        else:
+            if term=="LOCK1":
+                print("a")
+                days=30
+            elif term=="LOCK3":
+                days=120
+            elif term in ["LOCK12"]:
+                days=365
+            elif term=="FLEX":
+                days=1
+            interest=quantity*((1+percentage/100)**((days)/365)-1)/(days)
+        if asset in ["USDT","USDC"]:
+            return round(interest,6)
+        else:
+            return round(interest,8)
 
     def wallet_inizialitazion(self):
         """
@@ -210,19 +329,19 @@ class nexo:
         wallet.to_csv(os.path.join(self.path,"nexo.csv"))   
         return wallet
 
-    def conditions(self):
+    def terms(self):
         try:
-            df=pd.read_csv(os.path.join(self.path,"nexo_terms.csv"),index_col=[0,1])
+            df=pd.read_csv(os.path.join(self.path,"nexo_terms.csv"),index_col=[0,1,2])
         except:
-            df=pd.DataFrame(columns=["asset","term","percentage","nexo_tokens"])
-            df=df.set_index(["asset","term"])
+            df=pd.DataFrame(columns=["asset","term","nexo_tokens","percentage"])
+            df=df.set_index(["asset","term","nexo_tokens"])
         df=df.sort_index(level=0)
         df.to_csv(os.path.join(self.path,"nexo_terms.csv"))
         return df
 
-    def add_condition(self,asset,term,percentage,nexo_tokens):
-        df=self.conditions()
-        df.loc[(asset,term),:]=[percentage,nexo_tokens]
+    def add_term(self,asset,term,percentage,nexo_tokens):
+        df=self.terms()
+        df.loc[(asset,term,nexo_tokens),:]=[percentage]
         df=df.sort_index(level=0)
         df.to_csv(os.path.join(self.path,"nexo_terms.csv"))
         return df
@@ -231,7 +350,7 @@ class nexo:
         """
         create a new wallet if none are found in the directory
         """
-        wallet=pd.DataFrame(columns=["asset","location","release day","stacked","type"])
+        wallet=pd.DataFrame(columns=["asset","location","release day","stacked","type","accrued"])
         wallet=wallet.set_index(["asset","location","release day"])
         wallet=wallet.sort_index(level=0)
         return wallet
@@ -267,6 +386,7 @@ class nexo:
         self.wallet.loc[add_index,:]=[stack,free,value]
         self.wallet=self.wallet.sort_index(level=0)
         self.wallet.to_csv(os.path.join(self.path,"nexo.csv"))
+        print(self.wallet)
         return self.wallet
 
     def add_locked_stacking(self,asset,stacked_ammount,finish_stacking=None,lenght_stacking=None):
@@ -289,7 +409,7 @@ class nexo:
             stack_type="LOCK3"
         else:
             stack_type="LOCK1"
-        self.stacks.loc[(asset,"nexo",finish_stacking),:]=[stacked_ammount,stack_type]
+        self.stacks.loc[(asset,"nexo",finish_stacking),:]=[stacked_ammount,stack_type,0]
         self.stacks.to_csv(os.path.join(self.path,"nexo_stack.csv"))
         return self.wallet,self.stacks
 
@@ -318,12 +438,21 @@ class wallet:
         """
         self.path=path
         self.cmc=coinmarketcapapi.CoinMarketCapAPI(apis["cmc_key"])
+        wallets=[]
         if "binance" in exchanges:
             self.bin=binance(apis["api_secret"],apis["api_key"],self.cmc)
-            print(self.bin.binwallet)
+            wallets+=[self.bin.binwallet.sort_index(level=0)]
         if "nexo" in exchanges:
             self.nexo=nexo(self.cmc)
-            print(self.nexo.wallet)
+            wallets+=[self.nexo.wallet.sort_index(level=0)]
+        self.wallet=pd.concat(wallets).sort_index(level=0)
+        #print(self.wallet)
+        #print(self.nexo.interest("USDT","FLEX",299.384603-0.070677,"GOLD",method="coin"))
+
+    def visualize_progress(self,asset):
+        self.wallet.loc[asset,"value"]
+        
+        
 
         
 
@@ -337,4 +466,19 @@ def read_secrets():
 
 if __name__=="__main__":
     #print(pd.show_versions())
+    print()
     my_wallet=wallet(["binance","nexo"],read_secrets())
+    
+    
+    if False:
+        my_wallet.nexo.add_term("BTC","LOCK1",5.5,"GOLD")
+        my_wallet.nexo.add_term("BTC","FLEX",4.5,"GOLD")
+        my_wallet.nexo.add_term("NEXO","FLEX",7,"GOLD")
+        my_wallet.nexo.add_term("NEXO","LOCK3",9,"GOLD")
+        my_wallet.nexo.add_term("NEXO","LOCK12",12,"GOLD")
+        my_wallet.nexo.add_term("DOT","LOCK1",12,"GOLD")
+        my_wallet.nexo.add_term("DOT","FLEX",11,"GOLD")
+        my_wallet.nexo.add_term("DOGE","FLEX",0.5,"GOLD")
+        my_wallet.nexo.add_term("USDP","FLEX",9,"GOLD")
+        my_wallet.nexo.add_term("USDT","FLEX",9,"GOLD")
+        my_wallet.nexo.add_term("USDC","FLEX",9,"GOLD")
